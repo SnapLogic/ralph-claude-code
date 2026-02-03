@@ -290,6 +290,7 @@ main() {
     echo "  ralph-enable            # Enable Ralph in existing project (interactive)"
     echo "  ralph-enable-ci         # Enable Ralph in existing project (non-interactive)"
     echo "  ralph-import prd.md     # Convert PRD to Ralph project"
+    echo "  ralph-import --extend   # Add tasks from PRD to existing project"
     echo "  ralph-migrate           # Migrate existing project to .ralph/ structure"
     echo "  ralph-monitor           # Manual monitoring dashboard"
     echo ""
