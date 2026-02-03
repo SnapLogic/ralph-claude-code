@@ -267,3 +267,265 @@ EOF
     # 'none' doesn't import anything, so fails
     assert_failure
 }
+
+# =============================================================================
+# FIX_PLAN.MD PARSING (4 tests)
+# =============================================================================
+
+@test "parse_fix_plan_sections parses high priority tasks" {
+    cat > fix_plan.md << 'EOF'
+# Ralph Fix Plan
+
+## High Priority
+- [ ] High task 1
+- [ ] High task 2
+
+## Medium Priority
+- [ ] Medium task
+
+## Completed
+- [x] Done task
+EOF
+
+    # Don't use run - we need to preserve global arrays
+    parse_fix_plan_sections "fix_plan.md"
+    local result=$?
+
+    [[ $result -eq 0 ]]
+    # Check that PARSED_HIGH_PRIORITY array was populated
+    [[ "${#PARSED_HIGH_PRIORITY[@]}" -eq 2 ]]
+}
+
+@test "parse_fix_plan_sections parses completed tasks" {
+    cat > fix_plan.md << 'EOF'
+# Ralph Fix Plan
+
+## High Priority
+- [ ] Task 1
+
+## Completed
+- [x] Done task 1
+- [x] Done task 2
+- [x] Done task 3
+EOF
+
+    # Don't use run - we need to preserve global arrays
+    parse_fix_plan_sections "fix_plan.md"
+    local result=$?
+
+    [[ $result -eq 0 ]]
+    # Check completed array has 3 items
+    [[ "${#PARSED_COMPLETED[@]}" -eq 3 ]]
+}
+
+@test "parse_fix_plan_sections handles missing file" {
+    run parse_fix_plan_sections "nonexistent.md"
+    assert_failure
+}
+
+@test "parse_fix_plan_sections handles notes section" {
+    cat > fix_plan.md << 'EOF'
+# Ralph Fix Plan
+
+## High Priority
+- [ ] Task 1
+
+## Notes
+- Important note 1
+- Important note 2
+EOF
+
+    # Don't use run - we need to preserve global arrays
+    parse_fix_plan_sections "fix_plan.md"
+    local result=$?
+
+    [[ $result -eq 0 ]]
+    # Check notes array
+    [[ "${#PARSED_NOTES[@]}" -ge 1 ]]
+}
+
+# =============================================================================
+# TASK DEDUPLICATION (4 tests)
+# =============================================================================
+
+@test "deduplicate_tasks removes exact duplicates" {
+    local existing="- [ ] Task one
+- [ ] Task two"
+
+    local new="- [ ] Task one
+- [ ] Task three"
+
+    run deduplicate_tasks "$existing" "$new"
+
+    assert_success
+    # Should only output "Task three"
+    [[ "$output" =~ "Task three" ]]
+    [[ ! "$output" =~ "Task one" ]]
+}
+
+@test "deduplicate_tasks is case insensitive" {
+    local existing="- [ ] Implement Authentication"
+
+    local new="- [ ] implement authentication
+- [ ] New task"
+
+    run deduplicate_tasks "$existing" "$new"
+
+    assert_success
+    # Should only output "New task" (authentication is duplicate)
+    [[ "$output" =~ "New task" ]]
+    [[ ! "$output" =~ "authentication" ]]
+}
+
+@test "deduplicate_tasks ignores checkbox state" {
+    local existing="- [x] Completed task"
+
+    local new="- [ ] Completed task
+- [ ] New task"
+
+    run deduplicate_tasks "$existing" "$new"
+
+    assert_success
+    # "Completed task" should be deduplicated even though checkbox differs
+    [[ "$output" =~ "New task" ]]
+    [[ ! "$output" =~ "Completed task" ]]
+}
+
+@test "deduplicate_tasks handles empty existing" {
+    local new="- [ ] Task one
+- [ ] Task two"
+
+    run deduplicate_tasks "" "$new"
+
+    assert_success
+    # All tasks should be output
+    [[ "$output" =~ "Task one" ]]
+    [[ "$output" =~ "Task two" ]]
+}
+
+# =============================================================================
+# FIX_PLAN MERGING (4 tests)
+# =============================================================================
+
+@test "merge_fix_plan preserves completed tasks" {
+    cat > fix_plan.md << 'EOF'
+# Ralph Fix Plan
+
+## High Priority
+- [ ] Existing high task
+
+## Medium Priority
+- [ ] Existing medium task
+
+## Low Priority
+
+## Completed
+- [x] Finished task 1
+- [x] Finished task 2
+EOF
+
+    local new_tasks="- [ ] New task 1
+- [ ] New task 2"
+
+    run merge_fix_plan "fix_plan.md" "$new_tasks" "high"
+
+    assert_success
+    # Check completed tasks are preserved
+    [[ "$output" =~ "Finished task 1" ]]
+    [[ "$output" =~ "Finished task 2" ]]
+    # Check new tasks added
+    [[ "$output" =~ "New task 1" ]]
+    [[ "$output" =~ "New task 2" ]]
+}
+
+@test "merge_fix_plan adds tasks to specified section" {
+    cat > fix_plan.md << 'EOF'
+# Ralph Fix Plan
+
+## High Priority
+- [ ] High task
+
+## Medium Priority
+
+## Low Priority
+
+## Completed
+EOF
+
+    local new_tasks="- [ ] New medium task"
+
+    run merge_fix_plan "fix_plan.md" "$new_tasks" "medium"
+
+    assert_success
+    # New task should appear in output
+    [[ "$output" =~ "New medium task" ]]
+}
+
+@test "merge_fix_plan handles empty new tasks" {
+    cat > fix_plan.md << 'EOF'
+# Ralph Fix Plan
+
+## High Priority
+- [ ] Existing task
+
+## Completed
+- [x] Done task
+EOF
+
+    run merge_fix_plan "fix_plan.md" "" "high"
+
+    assert_success
+    # Existing content should be preserved
+    [[ "$output" =~ "Existing task" ]]
+    [[ "$output" =~ "Done task" ]]
+}
+
+@test "merge_fix_plan returns error for missing file" {
+    run merge_fix_plan "nonexistent.md" "- [ ] Task" "high"
+    assert_failure
+}
+
+# =============================================================================
+# UNIQUE TASK COUNT (2 tests)
+# =============================================================================
+
+@test "get_unique_task_count counts unique tasks correctly" {
+    cat > fix_plan.md << 'EOF'
+# Ralph Fix Plan
+
+## High Priority
+- [ ] Existing task
+
+## Completed
+EOF
+
+    local new_tasks="- [ ] Existing task
+- [ ] New task 1
+- [ ] New task 2"
+
+    run get_unique_task_count "fix_plan.md" "$new_tasks"
+
+    assert_success
+    # Should output 2 (only new tasks, not existing)
+    assert_output "2"
+}
+
+@test "get_unique_task_count returns 0 for all duplicates" {
+    cat > fix_plan.md << 'EOF'
+# Ralph Fix Plan
+
+## High Priority
+- [ ] Task A
+- [ ] Task B
+
+## Completed
+EOF
+
+    local new_tasks="- [ ] Task A
+- [ ] Task B"
+
+    run get_unique_task_count "fix_plan.md" "$new_tasks"
+
+    assert_success
+    assert_output "0"
+}

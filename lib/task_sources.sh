@@ -560,6 +560,347 @@ ${prd_tasks}
 }
 
 # =============================================================================
+# FIX_PLAN.MD PARSING AND MERGING (for --extend mode)
+# =============================================================================
+
+# Global arrays for parsed fix_plan sections
+declare -a PARSED_HIGH_PRIORITY=()
+declare -a PARSED_MEDIUM_PRIORITY=()
+declare -a PARSED_LOW_PRIORITY=()
+declare -a PARSED_COMPLETED=()
+declare -a PARSED_NOTES=()
+
+# parse_fix_plan_sections - Parse existing fix_plan.md into sections
+#
+# Parameters:
+#   $1 (fix_plan_file) - Path to fix_plan.md file
+#
+# Returns:
+#   0 - Success (sets PARSED_* arrays)
+#   1 - Error (file not found)
+#
+# Sets Global Variables:
+#   PARSED_HIGH_PRIORITY - Array of high priority tasks
+#   PARSED_MEDIUM_PRIORITY - Array of medium priority tasks
+#   PARSED_LOW_PRIORITY - Array of low priority tasks
+#   PARSED_COMPLETED - Array of completed tasks
+#   PARSED_NOTES - Array of notes lines
+#
+parse_fix_plan_sections() {
+    local fix_plan_file=$1
+
+    # Reset arrays
+    PARSED_HIGH_PRIORITY=()
+    PARSED_MEDIUM_PRIORITY=()
+    PARSED_LOW_PRIORITY=()
+    PARSED_COMPLETED=()
+    PARSED_NOTES=()
+
+    if [[ ! -f "$fix_plan_file" ]]; then
+        return 1
+    fi
+
+    local current_section=""
+    local in_notes=false
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Detect section headers
+        if echo "$line" | grep -qiE '^##[[:space:]]*(High|Critical)[[:space:]]*(Priority)?'; then
+            current_section="high"
+            in_notes=false
+            continue
+        elif echo "$line" | grep -qiE '^##[[:space:]]*(Medium|Normal)[[:space:]]*(Priority)?'; then
+            current_section="medium"
+            in_notes=false
+            continue
+        elif echo "$line" | grep -qiE '^##[[:space:]]*(Low|Minor)[[:space:]]*(Priority)?'; then
+            current_section="low"
+            in_notes=false
+            continue
+        elif echo "$line" | grep -qiE '^##[[:space:]]*(Completed|Done)'; then
+            current_section="completed"
+            in_notes=false
+            continue
+        elif echo "$line" | grep -qiE '^##[[:space:]]*Notes'; then
+            current_section="notes"
+            in_notes=true
+            continue
+        elif echo "$line" | grep -qE '^##[[:space:]]'; then
+            # Other section header - skip
+            current_section="other"
+            in_notes=false
+            continue
+        elif echo "$line" | grep -qE '^#[[:space:]]'; then
+            # Main title - skip
+            continue
+        fi
+
+        # Skip empty lines and non-task lines in task sections
+        if [[ -z "$line" ]] && [[ "$in_notes" != "true" ]]; then
+            continue
+        fi
+
+        # Parse task lines (must start with - [ ] or - [x])
+        if echo "$line" | grep -qE '^[[:space:]]*-[[:space:]]*\[[[:space:]]*[xX ]?[[:space:]]*\]'; then
+            case "$current_section" in
+                "high")
+                    PARSED_HIGH_PRIORITY+=("$line")
+                    ;;
+                "medium")
+                    PARSED_MEDIUM_PRIORITY+=("$line")
+                    ;;
+                "low")
+                    PARSED_LOW_PRIORITY+=("$line")
+                    ;;
+                "completed")
+                    PARSED_COMPLETED+=("$line")
+                    ;;
+            esac
+        elif [[ "$in_notes" == "true" ]] && [[ -n "$line" ]]; then
+            PARSED_NOTES+=("$line")
+        fi
+    done < "$fix_plan_file"
+
+    return 0
+}
+
+# deduplicate_tasks - Remove tasks that already exist in the fix_plan
+#
+# Parameters:
+#   $1 (existing_tasks) - Newline-separated existing tasks
+#   $2 (new_tasks) - Newline-separated new tasks to add
+#
+# Outputs:
+#   Unique new tasks (newline-separated) that don't exist in existing_tasks
+#   Comparison is case-insensitive and ignores checkbox state
+#
+# Returns:
+#   0 - Always succeeds
+#
+deduplicate_tasks() {
+    local existing_tasks=$1
+    local new_tasks=$2
+
+    if [[ -z "$new_tasks" ]]; then
+        return 0
+    fi
+
+    if [[ -z "$existing_tasks" ]]; then
+        echo "$new_tasks"
+        return 0
+    fi
+
+    # Normalize existing tasks for comparison (lowercase, strip checkbox)
+    local normalized_existing=""
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        # Extract task text after checkbox, normalize to lowercase
+        local task_text
+        task_text=$(echo "$line" | sed -E 's/^[[:space:]]*-[[:space:]]*\[[[:space:]]*[xX ]?[[:space:]]*\][[:space:]]*//' | tr '[:upper:]' '[:lower:]')
+        normalized_existing="${normalized_existing}${task_text}
+"
+    done <<< "$existing_tasks"
+
+    # Check each new task against normalized existing
+    while IFS= read -r new_line; do
+        [[ -z "$new_line" ]] && continue
+
+        # Normalize new task for comparison
+        local new_task_text
+        new_task_text=$(echo "$new_line" | sed -E 's/^[[:space:]]*-[[:space:]]*\[[[:space:]]*[xX ]?[[:space:]]*\][[:space:]]*//' | tr '[:upper:]' '[:lower:]')
+
+        # Check if exists (using fixed-string grep)
+        if ! echo "$normalized_existing" | grep -qFx "$new_task_text"; then
+            # Task is unique, output it
+            echo "$new_line"
+        fi
+    done <<< "$new_tasks"
+
+    return 0
+}
+
+# merge_fix_plan - Merge new tasks into existing fix_plan preserving completed items
+#
+# Parameters:
+#   $1 (existing_file) - Path to existing fix_plan.md
+#   $2 (new_tasks) - Newline-separated new tasks to add
+#   $3 (target_section) - Target section: "high", "medium", or "low" (default: "high")
+#
+# Outputs:
+#   Complete merged fix_plan.md content to stdout
+#
+# Returns:
+#   0 - Success
+#   1 - Error (existing file not found)
+#
+merge_fix_plan() {
+    local existing_file=$1
+    local new_tasks=$2
+    local target_section="${3:-high}"
+
+    # Parse existing fix_plan
+    if ! parse_fix_plan_sections "$existing_file"; then
+        return 1
+    fi
+
+    # Combine all existing tasks for deduplication
+    local all_existing=""
+    for task in "${PARSED_HIGH_PRIORITY[@]}"; do
+        all_existing="${all_existing}${task}
+"
+    done
+    for task in "${PARSED_MEDIUM_PRIORITY[@]}"; do
+        all_existing="${all_existing}${task}
+"
+    done
+    for task in "${PARSED_LOW_PRIORITY[@]}"; do
+        all_existing="${all_existing}${task}
+"
+    done
+    for task in "${PARSED_COMPLETED[@]}"; do
+        all_existing="${all_existing}${task}
+"
+    done
+
+    # Deduplicate new tasks
+    local unique_tasks
+    unique_tasks=$(deduplicate_tasks "$all_existing" "$new_tasks")
+
+    # Add unique tasks to target section
+    if [[ -n "$unique_tasks" ]]; then
+        while IFS= read -r task; do
+            [[ -z "$task" ]] && continue
+            case "$target_section" in
+                "high")
+                    PARSED_HIGH_PRIORITY+=("$task")
+                    ;;
+                "medium")
+                    PARSED_MEDIUM_PRIORITY+=("$task")
+                    ;;
+                "low")
+                    PARSED_LOW_PRIORITY+=("$task")
+                    ;;
+            esac
+        done <<< "$unique_tasks"
+    fi
+
+    # Generate merged fix_plan.md
+    cat << 'EOF'
+# Ralph Fix Plan
+
+## High Priority
+EOF
+
+    for task in "${PARSED_HIGH_PRIORITY[@]}"; do
+        echo "$task"
+    done
+
+    cat << 'EOF'
+
+## Medium Priority
+EOF
+
+    for task in "${PARSED_MEDIUM_PRIORITY[@]}"; do
+        echo "$task"
+    done
+
+    cat << 'EOF'
+
+## Low Priority
+EOF
+
+    for task in "${PARSED_LOW_PRIORITY[@]}"; do
+        echo "$task"
+    done
+
+    cat << 'EOF'
+
+## Completed
+EOF
+
+    for task in "${PARSED_COMPLETED[@]}"; do
+        echo "$task"
+    done
+
+    cat << 'EOF'
+
+## Notes
+EOF
+
+    if [[ ${#PARSED_NOTES[@]} -gt 0 ]]; then
+        for note in "${PARSED_NOTES[@]}"; do
+            echo "$note"
+        done
+    else
+        echo "- Focus on MVP functionality first"
+        echo "- Ensure each feature is properly tested"
+        echo "- Update this file after each major milestone"
+    fi
+
+    return 0
+}
+
+# get_unique_task_count - Count how many unique tasks would be added
+#
+# Parameters:
+#   $1 (existing_file) - Path to existing fix_plan.md
+#   $2 (new_tasks) - Newline-separated new tasks to check
+#
+# Outputs:
+#   Number of unique tasks (integer)
+#
+# Returns:
+#   0 - Success
+#
+get_unique_task_count() {
+    local existing_file=$1
+    local new_tasks=$2
+
+    if [[ -z "$new_tasks" ]]; then
+        echo "0"
+        return 0
+    fi
+
+    # Parse existing fix_plan
+    if ! parse_fix_plan_sections "$existing_file" 2>/dev/null; then
+        # If file doesn't exist, all tasks are unique
+        echo "$new_tasks" | grep -c '.' || echo "0"
+        return 0
+    fi
+
+    # Combine all existing tasks
+    local all_existing=""
+    for task in "${PARSED_HIGH_PRIORITY[@]}"; do
+        all_existing="${all_existing}${task}
+"
+    done
+    for task in "${PARSED_MEDIUM_PRIORITY[@]}"; do
+        all_existing="${all_existing}${task}
+"
+    done
+    for task in "${PARSED_LOW_PRIORITY[@]}"; do
+        all_existing="${all_existing}${task}
+"
+    done
+    for task in "${PARSED_COMPLETED[@]}"; do
+        all_existing="${all_existing}${task}
+"
+    done
+
+    # Count unique tasks
+    local unique_tasks
+    unique_tasks=$(deduplicate_tasks "$all_existing" "$new_tasks")
+
+    if [[ -z "$unique_tasks" ]]; then
+        echo "0"
+    else
+        echo "$unique_tasks" | grep -c '.' || echo "0"
+    fi
+
+    return 0
+}
+
+# =============================================================================
 # EXPORTS
 # =============================================================================
 
@@ -575,3 +916,7 @@ export -f convert_prd_with_claude
 export -f normalize_tasks
 export -f prioritize_tasks
 export -f import_tasks_from_sources
+export -f parse_fix_plan_sections
+export -f deduplicate_tasks
+export -f merge_fix_plan
+export -f get_unique_task_count

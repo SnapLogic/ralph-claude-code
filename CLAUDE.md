@@ -22,6 +22,8 @@ The system consists of four main bash scripts and a modular library system:
    - Uses modern Claude Code CLI with `--output-format json` for structured responses
    - Implements `detect_response_format()` and `parse_conversion_response()` for JSON parsing
    - Backward compatible with older CLI versions (automatic text fallback)
+   - **Extend mode** (`--extend`): Uses Claude Code to intelligently merge new tasks into existing fix_plan.md
+     - `extend_fix_plan_with_claude()` - Claude-based task extraction and deduplication
 6. **ralph_enable.sh** - Interactive wizard for enabling Ralph in existing projects
    - Multi-step wizard with environment detection, task source selection, configuration
    - Imports tasks from beads, GitHub Issues, or PRD documents
@@ -72,6 +74,7 @@ The system uses a modular architecture with reusable components in the `lib/` di
    - Safe file operations: `safe_create_file()`, `safe_create_dir()`
    - Project detection: `detect_project_context()`, `detect_git_info()`, `detect_task_sources()`
    - Template generation: `generate_prompt_md()`, `generate_agent_md()`, `generate_fix_plan_md()`, `generate_ralphrc()`
+   - **Extend helpers** (v0.12.0): `extend_prompt_md()`, `add_spec_file()`, `extract_prd_context()`
 
 6. **lib/wizard_utils.sh** - Interactive prompt utilities for enable wizard
    - User prompts: `confirm()`, `prompt_text()`, `prompt_number()`
@@ -83,6 +86,7 @@ The system uses a modular architecture with reusable components in the `lib/` di
    - GitHub integration: `check_github_available()`, `fetch_github_tasks()`, `get_github_issue_count()`
    - PRD extraction: `extract_prd_tasks()`, supports checkbox and numbered list formats
    - Task normalization: `normalize_tasks()`, `prioritize_tasks()`, `import_tasks_from_sources()`
+   - **Fix plan merging** (v0.12.0): `parse_fix_plan_sections()`, `deduplicate_tasks()`, `merge_fix_plan()`, `get_unique_task_count()`
 
 ## Key Commands
 
@@ -128,6 +132,27 @@ ralph-enable-ci                              # Sensible defaults
 ralph-enable-ci --from github               # With task source
 ralph-enable-ci --project-type typescript   # Override detection
 ralph-enable-ci --json                      # Machine-readable output
+```
+
+### Importing PRDs
+```bash
+# Create a new project from a PRD (standard mode)
+ralph-import ./docs/my-prd.md
+ralph-import ./docs/my-prd.md custom-project-name
+
+# Incremental import into existing project (extend mode - uses Claude Code)
+cd existing-ralph-project
+ralph-import --extend ./docs/phase2-prd.md
+
+# Target specific priority section
+ralph-import --extend --section medium ./docs/enhancements.md
+ralph-import --extend --section low ./docs/nice-to-have.md
+
+# Also update PROMPT.md with new context
+ralph-import --extend --update-prompt ./docs/phase2-prd.md
+
+# Preview changes without modifying files
+ralph-import --extend --dry-run ./docs/phase2-prd.md
 ```
 
 ### Running the Ralph Loop
@@ -424,7 +449,7 @@ Ralph uses advanced error detection with two-stage filtering to eliminate false 
 
 ## Test Suite
 
-### Test Files (420 tests total)
+### Test Files (486 tests total)
 
 | File | Tests | Description |
 |------|-------|-------------|
@@ -440,9 +465,10 @@ Ralph uses advanced error detection with two-stage filtering to eliminate false 
 | `test_project_setup.bats` | 36 | Project setup (setup.sh) validation |
 | `test_prd_import.bats` | 33 | PRD import (ralph_import.sh) workflows + modern CLI tests |
 | `test_enable_core.bats` | 30 | Enable core library (idempotency, project detection, template generation) |
-| `test_task_sources.bats` | 23 | Task sources (beads, GitHub, PRD extraction, normalization) |
+| `test_task_sources.bats` | 37 | Task sources (beads, GitHub, PRD extraction, normalization, merge functions) |
 | `test_ralph_enable.bats` | 22 | Ralph enable integration tests (wizard, CI version, JSON output) |
 | `test_wizard_utils.bats` | 20 | Wizard utility functions (stdout/stderr separation, prompt functions) |
+| `test_incremental_import.bats` | 20 | Incremental PRD import (--extend mode, deduplication, dry-run) |
 
 ### Running Tests
 ```bash

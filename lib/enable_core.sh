@@ -706,6 +706,167 @@ RALPHRCEOF
 }
 
 # =============================================================================
+# EXTEND HELPERS (for ralph-import --extend)
+# =============================================================================
+
+# extend_prompt_md - Extend PROMPT.md with new context section
+#
+# Parameters:
+#   $1 (prompt_file) - Path to existing PROMPT.md
+#   $2 (new_context) - New context content to add
+#   $3 (section_title) - Title for the new section (default: "Phase 2 Requirements")
+#
+# Returns:
+#   0 - Success
+#   1 - Error (file not found)
+#
+# Behavior:
+#   Inserts new section before "## Current Task" if found,
+#   otherwise appends to end of file.
+#
+extend_prompt_md() {
+    local prompt_file=$1
+    local new_context=$2
+    local section_title="${3:-Phase 2 Requirements}"
+
+    if [[ ! -f "$prompt_file" ]]; then
+        return 1
+    fi
+
+    # Create temp file for modification
+    local temp_file
+    temp_file=$(mktemp)
+
+    # Check if "## Current Task" section exists
+    if grep -q "^## Current Task" "$prompt_file"; then
+        # Insert new section before "## Current Task"
+        local in_current_task=false
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if echo "$line" | grep -q "^## Current Task"; then
+                # Insert new section before Current Task
+                echo ""
+                echo "## ${section_title}"
+                echo ""
+                echo "$new_context"
+                echo ""
+            fi
+            echo "$line"
+        done < "$prompt_file" > "$temp_file"
+    else
+        # Append new section to end
+        cat "$prompt_file" > "$temp_file"
+        echo "" >> "$temp_file"
+        echo "## ${section_title}" >> "$temp_file"
+        echo "" >> "$temp_file"
+        echo "$new_context" >> "$temp_file"
+    fi
+
+    # Replace original file
+    mv "$temp_file" "$prompt_file"
+
+    return 0
+}
+
+# add_spec_file - Copy PRD/spec file to .ralph/specs/ with unique name
+#
+# Parameters:
+#   $1 (source_file) - Path to source PRD/spec file
+#   $2 (prefix) - Optional prefix for the filename (default: derived from source)
+#
+# Outputs:
+#   Path to created spec file
+#
+# Returns:
+#   0 - Success
+#   1 - Error (source not found or copy failed)
+#
+add_spec_file() {
+    local source_file=$1
+    local prefix="${2:-}"
+
+    if [[ ! -f "$source_file" ]]; then
+        return 1
+    fi
+
+    # Ensure specs directory exists
+    local specs_dir=".ralph/specs"
+    mkdir -p "$specs_dir"
+
+    # Generate unique filename
+    local base_name
+    base_name=$(basename "$source_file")
+
+    if [[ -n "$prefix" ]]; then
+        base_name="${prefix}-${base_name}"
+    fi
+
+    local target_path="${specs_dir}/${base_name}"
+
+    # If file exists, add timestamp to make unique
+    if [[ -f "$target_path" ]]; then
+        local timestamp
+        timestamp=$(date +%Y%m%d-%H%M%S)
+        local name_without_ext="${base_name%.*}"
+        local ext="${base_name##*.}"
+        if [[ "$name_without_ext" == "$ext" ]]; then
+            # No extension
+            target_path="${specs_dir}/${name_without_ext}-${timestamp}"
+        else
+            target_path="${specs_dir}/${name_without_ext}-${timestamp}.${ext}"
+        fi
+    fi
+
+    # Copy file
+    if cp "$source_file" "$target_path" 2>/dev/null; then
+        echo "$target_path"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# extract_prd_context - Extract context/requirements summary from PRD for PROMPT.md
+#
+# Parameters:
+#   $1 (prd_file) - Path to PRD file
+#
+# Outputs:
+#   Markdown-formatted context suitable for PROMPT.md
+#
+# Returns:
+#   0 - Success
+#   1 - Error
+#
+extract_prd_context() {
+    local prd_file=$1
+
+    if [[ ! -f "$prd_file" ]]; then
+        return 1
+    fi
+
+    # Extract key sections from PRD
+    local context=""
+
+    # Look for requirements or features sections
+    local requirements
+    requirements=$(grep -A 20 -iE '^##?[[:space:]]*(Requirements|Features|Objectives)' "$prd_file" 2>/dev/null | head -15)
+
+    if [[ -n "$requirements" ]]; then
+        context="$requirements"
+    else
+        # Fallback: extract first meaningful section
+        context=$(head -30 "$prd_file" | grep -v '^$' | head -10)
+    fi
+
+    if [[ -n "$context" ]]; then
+        echo "$context"
+        return 0
+    fi
+
+    return 1
+}
+
+# =============================================================================
 # MAIN ENABLE LOGIC
 # =============================================================================
 
@@ -813,3 +974,6 @@ export -f generate_agent_md
 export -f generate_fix_plan_md
 export -f generate_ralphrc
 export -f enable_ralph_in_directory
+export -f extend_prompt_md
+export -f add_spec_file
+export -f extract_prd_context

@@ -1,11 +1,33 @@
 #!/bin/bash
 
 # Ralph Import - Convert PRDs to Ralph format using Claude Code
-# Version: 0.9.8 - Modern CLI support with JSON output parsing
+# Version: 0.12.0 - Added --extend mode for incremental PRD import
 set -e
+
+# Determine script directory for sourcing libraries
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source library files (try local first, then global installation)
+if [[ -f "$SCRIPT_DIR/lib/task_sources.sh" ]]; then
+    source "$SCRIPT_DIR/lib/task_sources.sh"
+elif [[ -f "$HOME/.ralph/lib/task_sources.sh" ]]; then
+    source "$HOME/.ralph/lib/task_sources.sh"
+fi
+
+if [[ -f "$SCRIPT_DIR/lib/enable_core.sh" ]]; then
+    source "$SCRIPT_DIR/lib/enable_core.sh"
+elif [[ -f "$HOME/.ralph/lib/enable_core.sh" ]]; then
+    source "$HOME/.ralph/lib/enable_core.sh"
+fi
 
 # Configuration
 CLAUDE_CODE_CMD="claude"
+
+# Extend mode configuration
+EXTEND_MODE=false
+EXTEND_SECTION="high"
+EXTEND_UPDATE_PROMPT=false
+EXTEND_DRY_RUN=false
 
 # Modern CLI Configuration (Phase 1.1)
 # These flags enable structured JSON output and controlled file operations
@@ -238,16 +260,29 @@ show_help() {
 Ralph Import - Convert PRDs to Ralph Format
 
 Usage: $0 <source-file> [project-name]
+       $0 --extend <source-file> [options]
 
 Arguments:
     source-file     Path to your PRD/specification file (any format)
     project-name    Name for the new Ralph project (optional, defaults to filename)
 
-Examples:
+Standard Mode (create new project):
     $0 my-app-prd.md
     $0 requirements.txt my-awesome-app
     $0 project-spec.json
-    $0 design-doc.docx webapp
+
+Extend Mode (add to existing project):
+    --extend            Import into existing Ralph project (preserves completed tasks)
+    --section <level>   Target priority section: high, medium, low (default: high)
+    --update-prompt     Also update PROMPT.md with new context
+    --dry-run           Preview changes without modifying files
+
+Extend Mode Examples:
+    cd existing-ralph-project
+    $0 --extend ./docs/phase2-prd.md
+    $0 --extend --section medium ./docs/enhancements.md
+    $0 --extend --update-prompt ./docs/phase2-prd.md
+    $0 --extend --dry-run ./docs/phase2-prd.md
 
 Supported formats:
     - Markdown (.md)
@@ -257,12 +292,19 @@ Supported formats:
     - PDFs (.pdf)
     - Any text-based format
 
-The command will:
+Standard Mode will:
 1. Create a new Ralph project
 2. Use Claude Code to intelligently convert your PRD into:
    - .ralph/PROMPT.md (Ralph instructions)
    - .ralph/fix_plan.md (prioritized tasks)
    - .ralph/specs/ (technical specifications)
+
+Extend Mode will:
+1. Extract tasks from the new PRD
+2. Merge unique tasks into existing .ralph/fix_plan.md
+3. Preserve all completed tasks
+4. Optionally update PROMPT.md with new context
+5. Copy PRD to .ralph/specs/
 
 HELPEOF
 }
@@ -567,33 +609,328 @@ PROMPTEOF
     fi
 }
 
+# =============================================================================
+# EXTEND MODE FUNCTIONS
+# =============================================================================
+
+# Extend mode temporary file names
+EXTEND_PROMPT_FILE=".ralph_extend_prompt.md"
+EXTEND_OUTPUT_FILE=".ralph_extend_output.json"
+
+# extend_fix_plan_with_claude - Use Claude Code to extend fix_plan.md with new PRD tasks
+#
+# Parameters:
+#   $1 (source_file) - Path to PRD file to import
+#   $2 (target_section) - Target section: "high", "medium", or "low"
+#
+# Returns:
+#   0 - Success (fix_plan.md updated)
+#   1 - Error (conversion failed)
+#
+# Dependencies:
+#   - Claude Code CLI with modern CLI features
+#   - Existing .ralph/fix_plan.md file
+#
+extend_fix_plan_with_claude() {
+    local source_file=$1
+    local target_section="${2:-high}"
+    local use_modern_cli=true
+    local cli_exit_code=0
+
+    log "INFO" "Extending fix_plan.md with Claude Code..."
+
+    # Check for modern CLI support
+    if ! check_claude_version 2>/dev/null; then
+        log "INFO" "Using standard CLI mode (modern features may not be available)"
+        use_modern_cli=false
+    else
+        log "INFO" "Using modern CLI with JSON output format"
+    fi
+
+    # Read existing fix_plan.md content
+    local existing_fix_plan=""
+    if [[ -f ".ralph/fix_plan.md" ]]; then
+        existing_fix_plan=$(cat ".ralph/fix_plan.md")
+    fi
+
+    # Read PRD content
+    local prd_content=""
+    if [[ -f "$source_file" ]]; then
+        prd_content=$(cat "$source_file")
+    else
+        log "ERROR" "PRD file not found: $source_file"
+        return 1
+    fi
+
+    # Build the extend prompt
+    cat > "$EXTEND_PROMPT_FILE" << EXTENDPROMPTEOF
+# Fix Plan Extension Task
+
+You are tasked with extending an existing fix_plan.md with new tasks from a PRD document.
+
+## CRITICAL REQUIREMENTS
+1. **PRESERVE ALL EXISTING TASKS EXACTLY** - Do not modify, remove, or rephrase any existing tasks
+2. **PRESERVE ALL COMPLETED TASKS** - Tasks marked with [x] must remain exactly as they are
+3. **ADD ONLY UNIQUE TASKS** - Skip any tasks that already exist (case-insensitive comparison)
+4. **TARGET SECTION: ${target_section} priority** - Add new tasks to the ${target_section} priority section
+5. **MAINTAIN FORMAT** - Keep the exact markdown format with sections: High Priority, Medium Priority, Low Priority, Completed, Notes
+
+## EXISTING FIX_PLAN.MD CONTENT
+\`\`\`markdown
+${existing_fix_plan}
+\`\`\`
+
+## NEW PRD DOCUMENT
+\`\`\`markdown
+${prd_content}
+\`\`\`
+
+## INSTRUCTIONS
+1. Read the existing fix_plan.md content carefully
+2. Extract actionable tasks from the PRD document:
+   - Look for checkbox items (- [ ] task)
+   - Look for numbered lists (1. task)
+   - Look for bullet points describing features/requirements
+3. For each extracted task:
+   - Check if it already exists in fix_plan.md (case-insensitive)
+   - If unique, add it to the ${target_section} priority section
+   - Convert to checkbox format: - [ ] task description
+4. Write the updated fix_plan.md content to .ralph/fix_plan.md
+5. Preserve the exact structure and all existing content
+
+## OUTPUT
+Write the complete updated fix_plan.md to .ralph/fix_plan.md using the Write tool.
+Report how many new tasks were added.
+
+EXTENDPROMPTEOF
+
+    # Build and execute Claude Code command
+    local stderr_file="${EXTEND_OUTPUT_FILE}.err"
+
+    if [[ "$use_modern_cli" == "true" ]]; then
+        # Modern CLI invocation with JSON output and controlled tool permissions
+        if $CLAUDE_CODE_CMD --output-format "$CLAUDE_OUTPUT_FORMAT" --allowedTools "${CLAUDE_ALLOWED_TOOLS[@]}" < "$EXTEND_PROMPT_FILE" > "$EXTEND_OUTPUT_FILE" 2> "$stderr_file"; then
+            cli_exit_code=0
+        else
+            cli_exit_code=$?
+        fi
+    else
+        # Standard CLI invocation (backward compatible)
+        if $CLAUDE_CODE_CMD < "$EXTEND_PROMPT_FILE" > "$EXTEND_OUTPUT_FILE" 2> "$stderr_file"; then
+            cli_exit_code=0
+        else
+            cli_exit_code=$?
+        fi
+    fi
+
+    # Log stderr if there was any (for debugging)
+    if [[ -s "$stderr_file" ]]; then
+        log "WARN" "CLI stderr output detected (see $stderr_file)"
+    fi
+
+    # Process the response
+    local output_format="text"
+    local json_parsed=false
+
+    if [[ -f "$EXTEND_OUTPUT_FILE" ]]; then
+        output_format=$(detect_response_format "$EXTEND_OUTPUT_FILE")
+
+        if [[ "$output_format" == "json" ]]; then
+            if parse_conversion_response "$EXTEND_OUTPUT_FILE"; then
+                json_parsed=true
+                log "INFO" "Parsed JSON response from Claude CLI"
+
+                # Check for errors in JSON response
+                if [[ "$PARSED_HAS_ERRORS" == "true" && "$PARSED_COMPLETION_STATUS" == "failed" ]]; then
+                    log "ERROR" "Fix plan extension failed"
+                    if [[ -n "$PARSED_ERROR_MESSAGE" ]]; then
+                        log "ERROR" "Error: $PARSED_ERROR_MESSAGE"
+                    fi
+                    rm -f "$EXTEND_PROMPT_FILE" "$EXTEND_OUTPUT_FILE" "$stderr_file"
+                    return 1
+                fi
+
+                # Log session ID if available
+                if [[ -n "$PARSED_SESSION_ID" && "$PARSED_SESSION_ID" != "null" ]]; then
+                    log "INFO" "Session ID: $PARSED_SESSION_ID"
+                fi
+            fi
+        fi
+    fi
+
+    # Check CLI exit code
+    if [[ $cli_exit_code -ne 0 ]]; then
+        log "ERROR" "Fix plan extension failed (exit code: $cli_exit_code)"
+        rm -f "$EXTEND_PROMPT_FILE" "$EXTEND_OUTPUT_FILE" "$stderr_file"
+        return 1
+    fi
+
+    # Clean up temp files
+    rm -f "$EXTEND_PROMPT_FILE" "$EXTEND_OUTPUT_FILE" "$stderr_file"
+
+    # Verify fix_plan.md was updated
+    if [[ ! -f ".ralph/fix_plan.md" ]]; then
+        log "ERROR" "fix_plan.md was not created/updated"
+        return 1
+    fi
+
+    # Use PARSED_RESULT for success message if available
+    if [[ "$json_parsed" == "true" && -n "$PARSED_RESULT" && "$PARSED_RESULT" != "null" ]]; then
+        log "SUCCESS" "Fix plan extended: $PARSED_RESULT"
+    else
+        log "SUCCESS" "Fix plan extended successfully"
+    fi
+
+    return 0
+}
+
+# validate_extend_mode - Verify we're in a Ralph-enabled project
+#
+# Returns:
+#   0 - Valid Ralph project found
+#   1 - Not a valid Ralph project
+#
+validate_extend_mode() {
+    if [[ ! -d ".ralph" ]]; then
+        log "ERROR" "Not in a Ralph-enabled project (no .ralph/ directory)"
+        log "INFO" "Run from a Ralph-enabled project directory, or use standard mode to create a new project"
+        return 1
+    fi
+
+    if [[ ! -f ".ralph/fix_plan.md" ]]; then
+        log "ERROR" "Invalid Ralph project: missing .ralph/fix_plan.md"
+        return 1
+    fi
+
+    return 0
+}
+
+# incremental_import - Main extend workflow using Claude Code
+#
+# Parameters:
+#   $1 (source_file) - Path to PRD file to import
+#
+# Uses globals:
+#   EXTEND_SECTION - Target section (high, medium, low)
+#   EXTEND_UPDATE_PROMPT - Whether to update PROMPT.md
+#   EXTEND_DRY_RUN - Whether to just preview changes
+#
+# Returns:
+#   0 - Success
+#   1 - Error
+#
+incremental_import() {
+    local source_file=$1
+
+    log "INFO" "Incremental import from: $source_file"
+    log "INFO" "Target section: $EXTEND_SECTION priority"
+
+    # Step 1: Preview mode (dry-run)
+    if [[ "$EXTEND_DRY_RUN" == "true" ]]; then
+        log "INFO" "=== DRY RUN PREVIEW ==="
+        echo ""
+        echo "Claude Code will:"
+        echo "  - Read existing .ralph/fix_plan.md"
+        echo "  - Extract tasks from: $source_file"
+        echo "  - Add unique tasks to $EXTEND_SECTION priority section"
+        echo "  - Preserve all existing and completed tasks"
+        echo ""
+
+        if [[ "$EXTEND_UPDATE_PROMPT" == "true" ]]; then
+            log "INFO" "PROMPT.md would also be updated with new context"
+        fi
+
+        log "INFO" "PRD would be copied to: .ralph/specs/$(basename "$source_file")"
+        log "INFO" "No changes made (dry-run mode)"
+        return 0
+    fi
+
+    # Step 2: Use Claude to extend fix_plan.md
+    if ! extend_fix_plan_with_claude "$source_file" "$EXTEND_SECTION"; then
+        log "ERROR" "Failed to extend fix_plan.md with Claude"
+        return 1
+    fi
+
+    # Step 3: Optionally update PROMPT.md (keep programmatic for now)
+    if [[ "$EXTEND_UPDATE_PROMPT" == "true" ]]; then
+        log "INFO" "Updating .ralph/PROMPT.md with new context..."
+
+        local context
+        context=$(extract_prd_context "$source_file")
+
+        if [[ -n "$context" ]]; then
+            local section_title
+            section_title="New Requirements ($(date +%Y-%m-%d))"
+            extend_prompt_md ".ralph/PROMPT.md" "$context" "$section_title"
+            log "SUCCESS" "Updated .ralph/PROMPT.md"
+        else
+            log "WARN" "Could not extract context from PRD for PROMPT.md"
+        fi
+    fi
+
+    # Step 4: Copy PRD to specs/
+    log "INFO" "Copying PRD to .ralph/specs/..."
+    local spec_path
+    spec_path=$(add_spec_file "$source_file" "imported")
+
+    if [[ -n "$spec_path" ]]; then
+        log "SUCCESS" "Copied PRD to: $spec_path"
+    else
+        log "WARN" "Could not copy PRD to specs directory"
+    fi
+
+    return 0
+}
+
 # Main function
 main() {
     local source_file="$1"
     local project_name="$2"
-    
+
     # Validate arguments
     if [[ -z "$source_file" ]]; then
         log "ERROR" "Source file is required"
         show_help
         exit 1
     fi
-    
+
     if [[ ! -f "$source_file" ]]; then
         log "ERROR" "Source file does not exist: $source_file"
         exit 1
     fi
-    
+
+    # Handle extend mode
+    if [[ "$EXTEND_MODE" == "true" ]]; then
+        if ! validate_extend_mode; then
+            exit 1
+        fi
+
+        if incremental_import "$source_file"; then
+            log "SUCCESS" "🎉 PRD imported successfully (extend mode)!"
+            echo ""
+            echo "Next steps:"
+            echo "  1. Review the updated .ralph/fix_plan.md"
+            echo "  2. Continue development:"
+            echo "     ralph --monitor"
+        else
+            log "ERROR" "Incremental import failed"
+            exit 1
+        fi
+        return
+    fi
+
+    # Standard mode: create new project
+
     # Default project name from filename
     if [[ -z "$project_name" ]]; then
         project_name=$(basename "$source_file" | sed 's/\.[^.]*$//')
     fi
-    
+
     log "INFO" "Converting PRD: $source_file"
     log "INFO" "Project name: $project_name"
-    
+
     check_dependencies
-    
+
     # Create project directory
     log "INFO" "Creating Ralph project: $project_name"
     ralph-setup "$project_name"
@@ -610,7 +947,7 @@ main() {
 
     # Run conversion using local copy (basename, not original path)
     convert_prd "$source_basename" "$project_name"
-    
+
     log "SUCCESS" "🎉 PRD imported successfully!"
     echo ""
     echo "Next steps:"
@@ -624,13 +961,75 @@ main() {
     echo "Project created in: $(pwd)"
 }
 
-# Handle command line arguments
-case "${1:-}" in
-    -h|--help|"")
+# Parse command line arguments
+parse_args() {
+    local source_file=""
+    local project_name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            --extend)
+                EXTEND_MODE=true
+                shift
+                ;;
+            --section)
+                if [[ -z "${2:-}" ]]; then
+                    log "ERROR" "--section requires a value (high, medium, or low)"
+                    exit 1
+                fi
+                case "$2" in
+                    high|medium|low)
+                        EXTEND_SECTION="$2"
+                        ;;
+                    *)
+                        log "ERROR" "Invalid section: $2 (must be high, medium, or low)"
+                        exit 1
+                        ;;
+                esac
+                shift 2
+                ;;
+            --update-prompt)
+                EXTEND_UPDATE_PROMPT=true
+                shift
+                ;;
+            --dry-run)
+                EXTEND_DRY_RUN=true
+                shift
+                ;;
+            -*)
+                log "ERROR" "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+            *)
+                # Positional arguments
+                if [[ -z "$source_file" ]]; then
+                    source_file="$1"
+                elif [[ -z "$project_name" ]]; then
+                    project_name="$1"
+                else
+                    log "ERROR" "Too many arguments"
+                    show_help
+                    exit 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Validate: source_file is required unless showing help
+    if [[ -z "$source_file" ]]; then
         show_help
         exit 0
-        ;;
-    *)
-        main "$@"
-        ;;
-esac
+    fi
+
+    # Call main with parsed arguments
+    main "$source_file" "$project_name"
+}
+
+# Entry point
+parse_args "$@"
