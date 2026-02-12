@@ -688,6 +688,10 @@ CLAUDE_OUTPUT_FORMAT="json"
 # Comma-separated list of allowed tools
 ALLOWED_TOOLS="Write,Read,Edit,Bash(git *),Bash(npm *),Bash(pytest)"
 
+# Additional directories Claude can access (comma-separated absolute paths)
+# Use when specs reference files outside the project directory
+# ADDITIONAL_DIRS=""
+
 # Session management
 SESSION_CONTINUITY=true
 SESSION_EXPIRY_HOURS=24

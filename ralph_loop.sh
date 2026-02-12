@@ -44,6 +44,7 @@ _env_CLAUDE_SESSION_EXPIRY_HOURS="${CLAUDE_SESSION_EXPIRY_HOURS:-}"
 _env_VERBOSE_PROGRESS="${VERBOSE_PROGRESS:-}"
 _env_CB_COOLDOWN_MINUTES="${CB_COOLDOWN_MINUTES:-}"
 _env_CB_AUTO_RESET="${CB_AUTO_RESET:-}"
+_env_ADDITIONAL_DIRS="${ADDITIONAL_DIRS:-}"
 
 # Now set defaults (only if not already set by environment)
 MAX_CALLS_PER_HOUR="${MAX_CALLS_PER_HOUR:-100}"
@@ -53,6 +54,7 @@ CLAUDE_TIMEOUT_MINUTES="${CLAUDE_TIMEOUT_MINUTES:-15}"
 # Modern Claude CLI configuration (Phase 1.1)
 CLAUDE_OUTPUT_FORMAT="${CLAUDE_OUTPUT_FORMAT:-json}"
 CLAUDE_ALLOWED_TOOLS="${CLAUDE_ALLOWED_TOOLS:-Write,Read,Edit,Bash(git *),Bash(npm *),Bash(pytest)}"
+ADDITIONAL_DIRS="${ADDITIONAL_DIRS:-}"
 CLAUDE_USE_CONTINUE="${CLAUDE_USE_CONTINUE:-true}"
 CLAUDE_SESSION_FILE="$RALPH_DIR/.claude_session_id" # Session ID persistence file
 CLAUDE_MIN_VERSION="2.0.76"              # Minimum required Claude CLI version
@@ -137,6 +139,9 @@ load_ralphrc() {
     if [[ -n "${RALPH_VERBOSE:-}" ]]; then
         VERBOSE_PROGRESS="$RALPH_VERBOSE"
     fi
+    if [[ -n "${ADDITIONAL_DIRS:-}" ]]; then
+        CLAUDE_ADDITIONAL_DIRS="$ADDITIONAL_DIRS"
+    fi
 
     # Restore ONLY values that were explicitly set via environment variables
     # (not script defaults). The _env_* variables were captured BEFORE defaults were set.
@@ -150,6 +155,7 @@ load_ralphrc() {
     [[ -n "$_env_VERBOSE_PROGRESS" ]] && VERBOSE_PROGRESS="$_env_VERBOSE_PROGRESS"
     [[ -n "$_env_CB_COOLDOWN_MINUTES" ]] && CB_COOLDOWN_MINUTES="$_env_CB_COOLDOWN_MINUTES"
     [[ -n "$_env_CB_AUTO_RESET" ]] && CB_AUTO_RESET="$_env_CB_AUTO_RESET"
+    [[ -n "$_env_ADDITIONAL_DIRS" ]] && ADDITIONAL_DIRS="$_env_ADDITIONAL_DIRS"
 
     RALPHRC_LOADED=true
     return 0
@@ -989,6 +995,18 @@ build_claude_command() {
         done
     fi
 
+    # Add additional directories for file access
+    if [[ -n "$ADDITIONAL_DIRS" ]]; then
+        local IFS=','
+        read -ra dirs_array <<< "$ADDITIONAL_DIRS"
+        for dir in "${dirs_array[@]}"; do
+            dir=$(echo "$dir" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [[ -n "$dir" ]]; then
+                CLAUDE_CMD_ARGS+=("--add-dir" "$dir")
+            fi
+        done
+    fi
+
     # Add session continuity flag
     # IMPORTANT: Use --resume with explicit session ID instead of --continue
     # --continue resumes the "most recent session in current directory" which
@@ -1640,6 +1658,7 @@ Modern CLI Options (Phase 1.1):
     --output-format FORMAT  Set Claude output format: json or text (default: $CLAUDE_OUTPUT_FORMAT)
                             Note: --live mode requires JSON and will auto-switch
     --allowed-tools TOOLS   Comma-separated list of allowed tools (default: $CLAUDE_ALLOWED_TOOLS)
+    --add-dir DIR           Add directory for Claude file access (can be repeated)
     --no-continue           Disable session continuity across loops
     --session-expiry HOURS  Set session expiration time in hours (default: $CLAUDE_SESSION_EXPIRY_HOURS)
 
@@ -1754,6 +1773,18 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             CLAUDE_ALLOWED_TOOLS="$2"
+            shift 2
+            ;;
+        --add-dir)
+            if [[ -z "$2" ]]; then
+                echo "Error: --add-dir requires a directory path"
+                exit 1
+            fi
+            if [[ -n "$ADDITIONAL_DIRS" ]]; then
+                ADDITIONAL_DIRS="$ADDITIONAL_DIRS,$2"
+            else
+                ADDITIONAL_DIRS="$2"
+            fi
             shift 2
             ;;
         --no-continue)

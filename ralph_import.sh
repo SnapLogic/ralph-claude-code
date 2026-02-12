@@ -432,7 +432,19 @@ PROMPTEOF
         # --print: Required for piped input (prevents interactive session hang)
         # --allowedTools: Permits file operations without user prompts
         # --strict-mcp-config: Skip loading user MCP servers (faster startup)
-        if $CLAUDE_CODE_CMD --print --strict-mcp-config --output-format "$CLAUDE_OUTPUT_FORMAT" --allowedTools "${CLAUDE_ALLOWED_TOOLS[@]}" < "$CONVERSION_PROMPT_FILE" > "$CONVERSION_OUTPUT_FILE" 2> "$stderr_file"; then
+        # Build additional directories flags
+        local -a add_dir_flags=()
+        if [[ -n "${ADDITIONAL_DIRS:-}" ]]; then
+            local IFS=','
+            read -ra dirs_array <<< "$ADDITIONAL_DIRS"
+            for dir in "${dirs_array[@]}"; do
+                dir=$(echo "$dir" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                if [[ -n "$dir" ]]; then
+                    add_dir_flags+=("--add-dir" "$dir")
+                fi
+            done
+        fi
+        if $CLAUDE_CODE_CMD --print --strict-mcp-config --output-format "$CLAUDE_OUTPUT_FORMAT" --allowedTools "${CLAUDE_ALLOWED_TOOLS[@]}" "${add_dir_flags[@]}" < "$CONVERSION_PROMPT_FILE" > "$CONVERSION_OUTPUT_FILE" 2> "$stderr_file"; then
             cli_exit_code=0
         else
             cli_exit_code=$?
